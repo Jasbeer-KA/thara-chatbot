@@ -9,7 +9,6 @@ import os
 from django.conf import settings
 import logging
 
-
 # Initialize logger
 logger = logging.getLogger(__name__)
 
@@ -30,6 +29,15 @@ def chat_view(request):
         response = ""
         
         if document:
+            # Log file information before processing
+            file_info = {
+                'name': document.name,
+                'size': document.size,
+                'content_type': document.content_type,
+                'user': request.user.username if request.user.is_authenticated else 'anonymous'
+            }
+            logger.info(f"File upload initiated: {file_info}")
+            
             # Process the document
             file_path = os.path.join(settings.BASE_DIR, 'media', document.name)
             
@@ -39,35 +47,30 @@ def chat_view(request):
                     for chunk in document.chunks():
                         destination.write(chunk)
                 
-                # Get file info for debugging
-                file_info = {
-                    'name': document.name,
-                    'size': document.size,
-                    'content_type': document.content_type
-                }
-                logger.info(f"Processing file: {file_info}")
+                logger.info(f"File saved temporarily at: {file_path}")
                 
                 # Process document based on type
                 content_type = document.content_type.lower()
                 if (document.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')) or 
                     content_type.startswith('image/')):
-                    # For images
-                    logger.info("Processing as image")
+                    logger.info("Processing as image file")
                     response = bot.process_image(file_path)
                 else:
-                    # For documents
-                    logger.info("Processing as document")
+                    logger.info("Processing as document file")
                     document_content = bot.process_document(file_path)
                     
                     if question:
                         enhanced_question = f"{question}\n\nDocument content:\n{document_content}"
+                        logger.debug(f"Enhanced question with document content")
                     else:
                         enhanced_question = f"Please analyze this document:\n{document_content}"
                     
                     response = bot.general_query(enhanced_question)
                 
+                logger.info(f"Successfully processed file: {document.name}")
+                
             except Exception as e:
-                logger.error(f"Error processing file: {str(e)}", exc_info=True)
+                logger.error(f"Error processing file {document.name}: {str(e)}", exc_info=True)
                 response = f"Error processing file: {str(e)}"
                 
             finally:
@@ -75,10 +78,12 @@ def chat_view(request):
                 try:
                     if os.path.exists(file_path):
                         os.remove(file_path)
+                        logger.debug(f"Temporary file {file_path} removed")
                 except Exception as e:
-                    logger.error(f"Error removing temp file: {str(e)}")
+                    logger.error(f"Error removing temp file {file_path}: {str(e)}")
         else:
             if question:  # Only process if there's actually a question
+                logger.info(f"Processing text query: {question[:100]}...")  # Log first 100 chars
                 response = bot.general_query(question)
         
         # Save to chat history if we have content
@@ -89,13 +94,18 @@ def chat_view(request):
                     (question, response)
                 )
                 bot.conn.commit()
+                logger.debug("Chat history updated successfully")
             except Exception as e:
                 logger.error(f"Error saving to chat history: {str(e)}")
         
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            logger.debug("Returning JSON response")
             return JsonResponse({"response": response})
+        
+        logger.debug("Rendering template response")
         return render(request, 'base.html', {"response": response})
     
+    logger.debug("Rendering empty chat template")
     return render(request, 'base.html')
 
 class DocumentUploadView(APIView):
@@ -104,41 +114,67 @@ class DocumentUploadView(APIView):
     def post(self, request):
         file = request.data.get("document")
         if not file:
+            logger.warning("No file provided in DocumentUploadView")
             return Response({"error": "No file provided"}, status=400)
+
+        # Log file information
+        file_info = {
+            'name': file.name,
+            'size': file.size,
+            'content_type': file.content_type,
+            'user': request.user.username if request.user.is_authenticated else 'anonymous'
+        }
+        logger.info(f"API file upload initiated: {file_info}")
 
         file_path = os.path.join(settings.BASE_DIR, 'media', file.name)
         try:
             with open(file_path, 'wb+') as destination:
                 for chunk in file.chunks():
                     destination.write(chunk)
+            
+            logger.info(f"File saved temporarily at: {file_path}")
 
             content_type = file.content_type.lower()
             if (file.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')) or content_type.startswith('image/')):
+                logger.info("Processing as image file via API")
                 result = bot.process_image(file_path)
             else:
+                logger.info("Processing as document file via API")
                 result = bot.process_document(file_path)
             
+            logger.info(f"Successfully processed file via API: {file.name}")
             return Response({"result": result}, content_type="application/json")
+            
         except Exception as e:
-            logger.error(f"Error in DocumentUploadView: {str(e)}", exc_info=True)
+            logger.error(f"API Error processing file {file.name}: {str(e)}", exc_info=True)
             return Response({"error": str(e)}, status=500)
+            
         finally:
             try:
                 if os.path.exists(file_path):
                     os.remove(file_path)
+                    logger.debug(f"Temporary API file {file_path} removed")
             except Exception as e:
-                logger.error(f"Error removing temp file: {str(e)}")
+                logger.error(f"Error removing temp API file {file_path}: {str(e)}")
 
 @api_view(['POST'])
 def debug_upload(request):
     """Endpoint for testing file uploads"""
     file = request.FILES.get('document')
     if file:
+        file_info = {
+            'name': file.name,
+            'size': file.size,
+            'content_type': file.content_type,
+            'user': request.user.username if request.user.is_authenticated else 'anonymous'
+        }
+        logger.info(f"Debug upload received: {file_info}")
         return Response({
             'name': file.name,
             'size': file.size,
             'content_type': file.content_type,
             'received': True
         })
+    
+    logger.warning("Debug upload endpoint called with no file")
     return Response({'error': 'No file received'}, status=400)
-
