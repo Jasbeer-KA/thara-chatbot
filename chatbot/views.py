@@ -4,177 +4,213 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.decorators import api_view
+from django.views.decorators.csrf import csrf_exempt
 from .logic.chatbot_engine import ChatbotEngine
 import os
 from django.conf import settings
 import logging
+import uuid
+import json
+from django.utils.text import get_valid_filename
+from django.core.files.storage import default_storage
 
-# Initialize logger
 logger = logging.getLogger(__name__)
-
-# Initialize the chatbot engine once when the module loads
 bot = ChatbotEngine()
 
-# Ensure media directory exists
-os.makedirs(os.path.join(settings.BASE_DIR, 'media'), exist_ok=True)
+# Constants
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+ALLOWED_CONTENT_TYPES = [
+    'application/pdf', 
+    'text/plain',
+    'image/jpeg', 
+    'image/png', 
+    'image/gif', 
+    'image/bmp'
+]
 
 def home(request):
-    return render(request, 'base.html')
+    return render(request, "base.html")
 
+def validate_response(response):
+    """Ensure response is in a valid format for AIMessage"""
+    if response is None:
+        return "No response generated"
+    if isinstance(response, (str, list)):
+        return response
+    return str(response)
+
+@csrf_exempt
 def chat_view(request):
     if request.method == "POST":
-        question = request.POST.get("question", "").strip()
-        document = request.FILES.get("document")
-        
-        response = ""
-        
-        if document:
-            # Log file information before processing
-            file_info = {
-                'name': document.name,
-                'size': document.size,
-                'content_type': document.content_type,
-                'user': request.user.username if request.user.is_authenticated else 'anonymous'
-            }
-            logger.info(f"File upload initiated: {file_info}")
+        try:
+            # Initialize variables
+            question = ""
+            document = None
+            response = ""
             
-            # Process the document
-            file_path = os.path.join(settings.BASE_DIR, 'media', document.name)
-            
-            try:
-                # Save the file temporarily
-                with open(file_path, 'wb+') as destination:
-                    for chunk in document.chunks():
-                        destination.write(chunk)
-                
-                logger.info(f"File saved temporarily at: {file_path}")
-                
-                # Process document based on type
-                content_type = document.content_type.lower()
-                if (document.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')) or 
-                    content_type.startswith('image/')):
-                    logger.info("Processing as image file")
-                    response = bot.process_image(file_path)
-                else:
-                    logger.info("Processing as document file")
-                    document_content = bot.process_document(file_path)
-                    
-                    if question:
-                        enhanced_question = f"{question}\n\nDocument content:\n{document_content}"
-                        logger.debug(f"Enhanced question with document content")
-                    else:
-                        enhanced_question = f"Please analyze this document:\n{document_content}"
-                    
-                    response = bot.general_query(enhanced_question)
-                
-                logger.info(f"Successfully processed file: {document.name}")
-                
-            except Exception as e:
-                logger.error(f"Error processing file {document.name}: {str(e)}", exc_info=True)
-                response = f"Error processing file: {str(e)}"
-                
-            finally:
-                # Clean up the temporary file
+            # Handle different content types
+            if request.content_type == 'application/json':
                 try:
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                        logger.debug(f"Temporary file {file_path} removed")
+                    data = json.loads(request.body)
+                    question = data.get("question", "").strip()
+                except json.JSONDecodeError:
+                    return JsonResponse({"error": "Invalid JSON format"}, status=400)
+            else:
+                question = request.POST.get("question", "").strip()
+                document = request.FILES.get("document")
+
+            # Process document if uploaded
+            if document:
+                # Validate file
+                if document.size > MAX_FILE_SIZE:
+                    return JsonResponse({"error": "File size exceeds 5MB limit."}, status=400)
+                if document.content_type not in ALLOWED_CONTENT_TYPES:
+                    return JsonResponse({"error": "Unsupported file type."}, status=400)
+
+                # Save file temporarily
+                safe_filename = get_valid_filename(f"{uuid.uuid4()}_{document.name}")
+                file_path = default_storage.save(f"uploads/{safe_filename}", document)
+                absolute_file_path = default_storage.path(file_path)
+
+                try:
+                    if document.content_type.startswith('image/'):
+                        response = bot.process_image(absolute_file_path)
+                    else:
+                        doc_content = bot.process_document(absolute_file_path)
+                        enhanced_question = (
+                            f"{question}\n\nDocument content:\n{doc_content}" 
+                            if question else 
+                            f"Please analyze this document:\n{doc_content}"
+                        )
+                        response = bot.general_query(enhanced_question)
                 except Exception as e:
-                    logger.error(f"Error removing temp file {file_path}: {str(e)}")
-        else:
-            if question:  # Only process if there's actually a question
-                logger.info(f"Processing text query: {question[:100]}...")  # Log first 100 chars
-                response = bot.general_query(question)
-        
-        # Save to chat history if we have content
-        if question or document:
-            try:
-                bot.cursor.execute(
-                    "INSERT INTO chat_history (user_query, bot_response) VALUES (?, ?)",
-                    (question, response)
-                )
-                bot.conn.commit()
-                logger.debug("Chat history updated successfully")
-            except Exception as e:
-                logger.error(f"Error saving to chat history: {str(e)}")
-        
-        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-            logger.debug("Returning JSON response")
-            return JsonResponse({"response": response})
-        
-        logger.debug("Rendering template response")
-        return render(request, 'base.html', {"response": response})
-    
-    logger.debug("Rendering empty chat template")
-    return render(request, 'base.html')
+                    logger.error(f"File processing error: {str(e)}", exc_info=True)
+                    response = f"Error processing file: {str(e)}"
+                finally:
+                    if default_storage.exists(file_path):
+                        default_storage.delete(file_path)
+
+            # Process text question if no document
+            elif question:
+                try:
+                    response = bot.general_query(question)
+                except Exception as e:
+                    logger.error(f"Query processing error: {str(e)}", exc_info=True)
+                    response = "Sorry, an error occurred while processing your question."
+
+            # Validate and store conversation
+            if question or document:
+                try:
+                    # Ensure response is in valid format
+                    valid_response = validate_response(response)
+                    user_input = question or document.name
+                    
+                    # Ensure user_input is not empty
+                    if not user_input.strip():
+                        user_input = "File upload" if document else "Empty query"
+                        
+                    bot._store_conversation(user_input, valid_response)
+                except Exception as e:
+                    logger.error(f"History save error: {str(e)}", exc_info=True)
+
+            # Return appropriate response
+            if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return JsonResponse({
+                    "response": response,
+                    "status": "success"
+                })
+            
+            return render(request, 'base.html', {
+                "response": response,
+                "question": question
+            })
+
+        except Exception as e:
+            logger.error(f"Chat view error: {str(e)}", exc_info=True)
+            return JsonResponse({
+                "error": "An unexpected error occurred",
+                "details": str(e)
+            }, status=500)
+
+    # GET request - render template with history
+    try:
+        history = []
+        bot.cursor.execute(
+            "SELECT user_query, bot_response FROM chat_history ORDER BY timestamp DESC LIMIT 10"
+        )
+        history = bot.cursor.fetchall()
+    except Exception as e:
+        logger.error(f"History fetch error: {str(e)}")
+        history = []
+
+    return render(request, 'base.html', {
+        'history': history,
+        'response': request.GET.get('response', ''),
+        'question': request.GET.get('question', '')
+    })
 
 class DocumentUploadView(APIView):
     parser_classes = [MultiPartParser]
 
     def post(self, request):
-        file = request.data.get("document")
-        if not file:
-            logger.warning("No file provided in DocumentUploadView")
-            return Response({"error": "No file provided"}, status=400)
-
-        # Log file information
-        file_info = {
-            'name': file.name,
-            'size': file.size,
-            'content_type': file.content_type,
-            'user': request.user.username if request.user.is_authenticated else 'anonymous'
-        }
-        logger.info(f"API file upload initiated: {file_info}")
-
-        file_path = os.path.join(settings.BASE_DIR, 'media', file.name)
         try:
+            file = request.data.get("document")
+            if not file:
+                return Response({"error": "No file provided"}, status=400)
+
+            # Validate file
+            if file.size > MAX_FILE_SIZE:
+                return Response({"error": "File too large"}, status=400)
+            if file.content_type not in ALLOWED_CONTENT_TYPES:
+                return Response({"error": "Unsupported file type"}, status=400)
+
+            # Save temporarily
+            file_path = os.path.join(settings.MEDIA_ROOT, file.name)
             with open(file_path, 'wb+') as destination:
                 for chunk in file.chunks():
                     destination.write(chunk)
-            
-            logger.info(f"File saved temporarily at: {file_path}")
 
-            content_type = file.content_type.lower()
-            if (file.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')) or content_type.startswith('image/')):
-                logger.info("Processing as image file via API")
-                result = bot.process_image(file_path)
-            else:
-                logger.info("Processing as document file via API")
-                result = bot.process_document(file_path)
-            
-            logger.info(f"Successfully processed file via API: {file.name}")
-            return Response({"result": result}, content_type="application/json")
-            
-        except Exception as e:
-            logger.error(f"API Error processing file {file.name}: {str(e)}", exc_info=True)
-            return Response({"error": str(e)}, status=500)
-            
-        finally:
             try:
+                if file.content_type.startswith('image/'):
+                    result = bot.process_image(file_path)
+                else:
+                    result = bot.process_document(file_path)
+                
+                return Response({
+                    "result": result,
+                    "status": "success"
+                })
+            except Exception as e:
+                logger.error(f"Document processing error: {str(e)}", exc_info=True)
+                return Response({
+                    "error": str(e),
+                    "status": "error"
+                }, status=500)
+            finally:
                 if os.path.exists(file_path):
                     os.remove(file_path)
-                    logger.debug(f"Temporary API file {file_path} removed")
-            except Exception as e:
-                logger.error(f"Error removing temp API file {file_path}: {str(e)}")
+                    
+        except Exception as e:
+            logger.error(f"Document upload error: {str(e)}", exc_info=True)
+            return Response({
+                "error": str(e),
+                "status": "error"
+            }, status=500)
 
 @api_view(['POST'])
 def debug_upload(request):
     """Endpoint for testing file uploads"""
     file = request.FILES.get('document')
     if file:
-        file_info = {
-            'name': file.name,
-            'size': file.size,
-            'content_type': file.content_type,
-            'user': request.user.username if request.user.is_authenticated else 'anonymous'
-        }
-        logger.info(f"Debug upload received: {file_info}")
         return Response({
             'name': file.name,
             'size': file.size,
             'content_type': file.content_type,
-            'received': True
+            'received': True,
+            'status': 'success'
         })
     
-    logger.warning("Debug upload endpoint called with no file")
-    return Response({'error': 'No file received'}, status=400)
+    return Response({
+        'error': 'No file received',
+        'status': 'error'
+    }, status=400)

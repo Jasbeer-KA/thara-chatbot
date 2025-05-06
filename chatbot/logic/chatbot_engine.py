@@ -1,198 +1,3 @@
-# import os, re, time, logging, sqlite3, io
-# from datetime import datetime
-# from PIL import Image, ImageFilter
-# from docx import Document
-# import PyPDF2
-# import pytesseract
-# import requests
-# import pyttsx3
-# from duckduckgo_search import DDGS
-# from sympy import sympify
-# from langchain.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, MessagesPlaceholder
-# from langchain.schema.runnable import RunnablePassthrough
-# from langchain.memory import ConversationBufferMemory
-# from langchain_ollama.llms import OllamaLLM
-# from langchain_community.embeddings import FastEmbedEmbeddings
-# import chromadb
-
-# class ChatbotEngine:
-#     SUPPORTED_DOC_TYPES = ('.pdf', '.docx', '.txt')
-#     SUPPORTED_IMAGE_TYPES = ('.png', '.jpg', '.jpeg')
-
-#     def __init__(self):
-#         self.initialize_llm()
-#         self.initialize_memory()
-#         self.initialize_database()
-#         self.initialize_vector_db()
-#         self.initialize_tts()
-
-#     def initialize_llm(self):
-#         self.llm = OllamaLLM(model="deepseek-r1:latest")
-#         self.prompt = ChatPromptTemplate.from_messages([
-#             MessagesPlaceholder(variable_name="chat_history"),
-#             HumanMessagePromptTemplate.from_template("{text}")
-#         ])
-#         self.llm_chain = self.prompt | self.llm | RunnablePassthrough()
-
-#     def initialize_memory(self):
-#         self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-#     def initialize_database(self):
-#         self.conn = sqlite3.connect("chatbot_memory.db", check_same_thread=False)
-#         self.cursor = self.conn.cursor()
-#         self.cursor.execute("""
-#             CREATE TABLE IF NOT EXISTS chat_history (
-#                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-#                 user_query TEXT,
-#                 bot_response TEXT,
-#                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-#             )
-#         """)
-#         self.cursor.execute("""
-#             CREATE TABLE IF NOT EXISTS documents (
-#                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-#                 filename TEXT,
-#                 content TEXT,
-#                 embedding_id TEXT,
-#                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP  
-#             )
-#         """)
-#         self.conn.commit()
-
-#     def initialize_vector_db(self):
-#         self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
-#         self.doc_collection = self.chroma_client.get_or_create_collection(name="document_qna")
-#         self.embedding_model = FastEmbedEmbeddings()
-
-#     def initialize_tts(self):
-#         try:
-#             self.tts_engine = pyttsx3.init()
-#             self.voices = self.tts_engine.getProperty('voices')
-#             self.current_voice = 0
-#         except Exception as e:
-#             print(f"TTS Init Error: {e}")
-#             self.tts_engine = None
-
-#     def process_document(self, file_path):
-#         text = self._extract_text(file_path)
-#         if not text.strip():
-#             return "Could not extract text."
-
-#         doc_id = f"doc_{hash(text)}"
-#         doc_name = os.path.basename(file_path)
-
-#         try:
-#             self.cursor.execute(
-#                 "INSERT OR REPLACE INTO documents (filename, content, embedding_id) VALUES (?, ?, ?)",
-#                 (doc_name, text, doc_id)
-#             )
-#             self.conn.commit()
-
-#             embedding = self.embedding_model.embed_query(text)
-#             self.doc_collection.upsert(
-#                 ids=[doc_id],
-#                 embeddings=[embedding],
-#                 documents=[text],
-#                 metadatas=[{
-#                     "source": file_path,
-#                     "name": doc_name,
-#                     "type": os.path.splitext(file_path)[1][1:],
-#                     "timestamp": datetime.now().isoformat()
-#                 }]
-#             )
-
-#             return f"✅ Document '{doc_name}' processed and stored."
-#         except Exception as e:
-#             self.conn.rollback()
-#             logging.error(f"Document processing error: {e}")
-#             return f"Processing failed: {e}"
-
-#     def _extract_text(self, file_path):
-#         ext = os.path.splitext(file_path)[1].lower()
-#         try:
-#             if ext == '.pdf':
-#                 with open(file_path, 'rb') as f:
-#                     reader = PyPDF2.PdfReader(f)
-#                     return ''.join([page.extract_text() for page in reader.pages if page.extract_text()])
-#             elif ext == '.docx':
-#                 doc = Document(file_path)
-#                 return '\n'.join([p.text for p in doc.paragraphs])
-#             elif ext in self.SUPPORTED_IMAGE_TYPES:
-#                 img = Image.open(file_path)
-#                 return pytesseract.image_to_string(img)
-#             elif ext == '.txt':
-#                 with open(file_path, 'r', encoding='utf-8') as f:
-#                     return f.read()
-#         except Exception as e:
-#             logging.error(f"Text extraction failed: {e}")
-#             return ""
-#         return ""
-
-#     def general_query(self, query):
-#         if not query.strip():
-#             return "Empty query"
-
-#         if self._is_math_expression(query):
-#             try:
-#                 result = sympify(query).evalf()
-#                 return f"The result is: {result}"
-#             except:
-#                 return "Couldn't solve that expression."
-
-#         if any(word in query.lower() for word in ["search", "find", "look up"]):
-#             return self._search_web(query)
-
-#         # Check vector db
-#         try:
-#             results = self.doc_collection.query(
-#                 query_texts=[query],
-#                 n_results=1,
-#                 include=["documents"]
-#             )
-#             if results["documents"] and results["documents"][0]:
-#                 doc_context = results["documents"][0][0]
-#                 return self._generate_response(query, doc_context)
-#         except Exception as e:
-#             logging.error(f"Vector DB query failed: {e}")
-
-#         return self._generate_response(query)
-
-#     def _generate_response(self, question, context=""):
-#         prompt_text = (
-#             f"Answer the question based on this context:\n\n"
-#             f"{context}\n\n"
-#             f"Question: {question}"
-#         )
-
-#         result = self.llm_chain.invoke({
-#             "chat_history": self.memory.load_memory_variables({})["chat_history"],
-#             "text": prompt_text
-#         })
-
-#         if isinstance(result, dict) and "text" in result:
-#             return result["text"]
-#         return str(result)
-
-#     def _is_math_expression(self, query):
-#         return re.fullmatch(r"[0-9\+\-\*/\.\(\)xX÷\^ ]+", query.strip())
-
-#     def _search_web(self, query):
-#         try:
-#             with DDGS() as ddgs:
-#                 results = list(ddgs.text(query, max_results=3))
-#                 if not results:
-#                     return "No results found"
-#                 formatted = [f"{i+1}. {r['title']}\n{r['body']}\n{r['href']}" for i, r in enumerate(results)]
-#                 return "Search Results:\n" + "\n\n".join(formatted)
-#         except Exception as e:
-#             logging.error(f"Web search failed: {e}")
-#             return f"Web search failed: {e}"
-
-
-
-
-
-
 import os, re, time, logging, sqlite3, io
 from datetime import datetime
 from PIL import Image, ImageFilter
@@ -223,15 +28,25 @@ class ChatbotEngine:
         self.initialize_tts()
 
     def initialize_llm(self):
-        self.llm = OllamaLLM(model="deepseek-r1:latest")
+        self.llm = OllamaLLM(model="deepseek-r1:latest", temperature=0.7)
         self.prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are Thara Chat, a helpful AI assistant. Provide concise, friendly responses."),
             MessagesPlaceholder(variable_name="chat_history"),
-            HumanMessagePromptTemplate.from_template("{text}")
+            ("human", "{text}")
         ])
-        self.llm_chain = self.prompt | self.llm | RunnablePassthrough()
+        self.llm_chain = (
+            RunnablePassthrough.assign(
+                chat_history=lambda x: self.memory.load_memory_variables(x)["chat_history"]
+            )
+            | self.prompt
+            | self.llm
+        )
+
 
     def initialize_memory(self):
         self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+
 
     def initialize_database(self):
         self.conn = sqlite3.connect("chatbot_memory.db", check_same_thread=False)
@@ -358,7 +173,7 @@ class ChatbotEngine:
         if any(phrase in clean_query for phrase in ["who are you", "what are you", "your name"]):
             return self._describe_identity()
 
-        # Handle capability questions - FIXED: Changed parameter name from 'detailed' to 'detailed_mode'
+        # Handle capability questions
         if any(phrase in clean_query for phrase in ["what can you do", "services", "capabilities", "help with", "what do you offer"]):
             detailed_mode = "detailed" in clean_query or "full" in clean_query
             return self._list_services(detailed_mode)
@@ -367,6 +182,28 @@ class ChatbotEngine:
         if clean_query.startswith(("thank", "thanks", "appreciate")):
             return self._thank_you_response()
 
+        # Handle math expressions
+        if self._is_math_expression(clean_query):
+            try:
+                result = sympify(clean_query.replace('x', '*').replace('X', '*').replace('÷', '/'))
+                return f"The result is: {result.evalf()}"
+            except:
+                pass  # Fall through to LLM if math fails
+
+        # Default case - use LLM for all other queries
+        try:
+            # Check for repeated question first
+            previous_answer = self._check_repeated_question(query)
+            if previous_answer:
+                return previous_answer
+
+            # Generate response using LLM
+            response = self._generate_response(query)
+            return self._format_response(response)
+            
+        except Exception as e:
+            logging.error(f"Error generating response: {e}")
+            return "I encountered an error while processing your request. Please try again."
 
     def _is_repeated_greeting(self):
         """Check if the last message was also a greeting"""

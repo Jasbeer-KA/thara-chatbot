@@ -1,5 +1,3 @@
-    // chat.js - Complete JavaScript for Thara Chat
-
 // Helper function to get CSRF token
 function getCookie(name) {
     let cookieValue = null;
@@ -259,10 +257,10 @@ function speakMessage(message) {
 }
 
 // Handle form submission
-chatForm.addEventListener('submit', function(e) {
+chatForm.addEventListener('submit', async function(e) {
     e.preventDefault();
     
-    const formData = new FormData(this);
+    const formData = new FormData();
     const question = questionInput.value.trim();
     const file = fileInput.files[0];
     
@@ -336,24 +334,28 @@ chatForm.addEventListener('submit', function(e) {
     chatContainer.appendChild(typingIndicator);
     chatContainer.scrollTop = chatContainer.scrollHeight;
 
-    fetch(this.action, {
-        method: 'POST',
-        body: formData,
-        headers: {
-            'X-Requested-With': 'XMLHttpRequest',
-            'X-CSRFToken': getCookie('csrftoken'),
-        },
-        credentials: 'include'
-    })
-    .then(response => {
+    // Prepare form data
+    if (question) formData.append('question', question);
+    if (file) formData.append('document', file);
+
+    try {
+        const response = await fetch(this.action, {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRFToken': getCookie('csrftoken'),
+            },
+            credentials: 'include'
+        });
+
         if (!response.ok) {
-            return response.json().then(err => {
-                throw new Error(err.error || 'Network response was not ok');
-            });
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Request failed');
         }
-        return response.json();
-    })
-    .then(data => {
+
+        const data = await response.json();
+        
         // Remove typing indicator
         const typingIndicators = document.querySelectorAll('.typing-indicator');
         typingIndicators.forEach(indicator => {
@@ -389,12 +391,16 @@ chatForm.addEventListener('submit', function(e) {
             // Update history in sidebar
             updateChatHistory(question || `Uploaded file: ${file.name}`, data.response);
         }
-    })
-    .catch(error => {
+    } catch (error) {
         console.error('Error:', error);
         showError(error.message || 'Could not get a response from the server');
-    })
-    .finally(() => {
+        
+        // Remove typing indicator on error
+        const typingIndicators = document.querySelectorAll('.typing-indicator');
+        typingIndicators.forEach(indicator => {
+            indicator.closest('.message').remove();
+        });
+    } finally {
         // Reset form and button state
         questionInput.value = '';
         fileInput.value = '';
@@ -405,7 +411,7 @@ chatForm.addEventListener('submit', function(e) {
             <line x1="22" y1="2" x2="11" y2="13"></line>
             <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
         </svg>`;
-    });
+    }
 });
 
 // Update chat history in sidebar
