@@ -1,5 +1,6 @@
 from django.db import models
 
+
 class ChatHistory(models.Model):
     user_query = models.TextField()
     bot_response = models.TextField()
@@ -7,6 +8,7 @@ class ChatHistory(models.Model):
 
     def __str__(self):
         return f"[{self.timestamp}] {self.user_query[:50]}..."
+
 
 class Document(models.Model):
     filename = models.CharField(max_length=255)
